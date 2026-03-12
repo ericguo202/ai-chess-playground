@@ -29,21 +29,18 @@ GROK_BASE_URL = "https://api.x.ai/v1"
 
 deepseek_client = AsyncOpenAI(base_url=DEEPSEEK_BASE_URL, api_key=os.getenv("DEEPSEEK_API_KEY"))
 gemini_client = AsyncOpenAI(base_url=GEMINI_BASE_URL, api_key=os.getenv("GOOGLE_API_KEY"))
-groq_client = AsyncOpenAI(base_url=GROQ_BASE_URL, api_key=os.getenv("GROQ_API_KEY"))
 anthropic_client = AsyncOpenAI(base_url=ANTHROPIC_BASE_URL, api_key=os.getenv("ANTHROPIC_API_KEY"))
 grok_client = AsyncOpenAI(base_url=GROK_BASE_URL, api_key=os.getenv("GROK_API_KEY"))
 
 deepseek_model = OpenAIChatCompletionsModel(model="deepseek-chat", openai_client=deepseek_client)
 gemini_model = OpenAIChatCompletionsModel(model="gemini-2.5-pro", openai_client=gemini_client)
-llama3_3_model = OpenAIChatCompletionsModel(model="llama-3.3-70b-versatile", openai_client=groq_client)
-grok_model = OpenAIChatCompletionsModel(model="grok-4", openai_client=grok_client)
+grok_model = OpenAIChatCompletionsModel(model="grok-4-1-fast-reasoning", openai_client=grok_client)
 claude_model = OpenAIChatCompletionsModel(model="claude-haiku-4-5-20251001", openai_client=anthropic_client)
 
 MODEL_MAP = {
     "GPT-4.1-mini": "gpt-4.1-mini",
     "Gemini 2.5 Pro": gemini_model,
     "DeepSeek Chat": deepseek_model,
-    "Llama 3.3": llama3_3_model,
     "Grok 4": grok_model,
     "Claude Haiku 4.5": claude_model,
 }
@@ -60,7 +57,7 @@ WHITE_INSTRUCTIONS = """
     TURN PROTOCOL:
     On "start" or when you have control:
     1) Call tool get_opponent_last_move() to get Black's last move. If it returns None, you are first to move.
-    2) If you do not want to make a move, respond with normal text "RESIGN".
+    2) If you think you are losing, you MUST respond with normal text "RESIGN".
     3) Otherwise, choose ONE move in standard algebraic notation.
         - DO NOT include move numbers (e.g. do NOT write "1.e4").
         - DO NOT include commentary or multiple lines.
@@ -82,7 +79,7 @@ BLACK_INSTRUCTIONS = """
     TURN PROTOCOL:
     When you have control:
     1) Call tool get_opponent_last_move() to get White's last move.
-    2) If you do not want to make a move, respond with normal text "RESIGN".
+    2) If you think you are losing, you MUST respond with normal text "RESIGN".
     3) Otherwise, choose ONE move in standard algebraic notation.
         - DO NOT include move numbers (e.g. do NOT write "1...e5").
         - DO NOT include commentary or multiple lines.
@@ -102,6 +99,7 @@ class GameSession:
         self.move_log: list[str] = []
         self.queue: asyncio.Queue = asyncio.Queue()
         self.game_task: asyncio.Task | None = None
+        self.end_message: str = ""
 
     def reset(self):
         if self.game_task and not self.game_task.done():
@@ -110,13 +108,15 @@ class GameSession:
         self.move_log.clear()
         self.queue = asyncio.Queue()
         self.game_task = None
+        self.end_message = ""
 
     def board_svg(self) -> str:
         lastmove = self.board.peek() if self.board.move_stack else None
         return chess.svg.board(self.board, size=400, lastmove=lastmove)
 
-
+# Creates the tools that the agents have access to
 def create_tools(session: GameSession):
+    # Make a move on the board
     @function_tool
     def make_move(san_move: str):
         try:
@@ -157,6 +157,7 @@ def create_tools(session: GameSession):
             legal_moves = ", ".join(session.board.san(m) for m in session.board.legal_moves)
             return {"status": "Illegal move", "legal_moves": legal_moves}
 
+    # Retrieve opponent's previous move
     @function_tool
     def get_opponent_last_move():
         try:
@@ -201,6 +202,7 @@ async def start_game(white_choice: str, black_choice: str, max_turns: int, sessi
         "Game starting...",
         gr.update(interactive=False),
         gr.update(interactive=False),
+        "",
         session,
     )
 
@@ -210,7 +212,9 @@ async def start_game(white_choice: str, black_choice: str, max_turns: int, sessi
 
     async def run_game():
         try:
-            await Runner.run(white_agent, "start", max_turns=max_turns)
+            result = await Runner.run(white_agent, "start", max_turns=max_turns)
+            if isinstance(result.final_output, str) and result.final_output.strip():
+                session.end_message = result.final_output.strip()
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -231,14 +235,17 @@ async def start_game(white_choice: str, black_choice: str, max_turns: int, sessi
             log,
             gr.update(interactive=False),
             gr.update(interactive=False),
+            "",
             session,
         )
 
+    end_html = f"<p style='color: green'>{session.end_message}</p>" if session.end_message else ""
     yield (
         session.board_svg(),
         "\n".join(session.move_log),
         gr.update(interactive=True),
         gr.update(interactive=True),
+        end_html,
         session,
     )
 
@@ -250,9 +257,37 @@ async def reset_game(session: GameSession):
         "Board reset. Select models and start a new game.",
         gr.update(interactive=True),
         gr.update(interactive=True),
+        "",
         session,
     )
 
+# Set themes
+custom_green = gr.themes.Color(
+    name="css_green",
+    c50="#e6f4e6",
+    c100="#cce9cc",
+    c200="#99d399",
+    c300="#66bd66",
+    c400="#339633",
+    c500="#007100",  # custom green
+    c600="#007700",
+    c700="#006600",
+    c800="#004d00",
+    c900="#003300",
+    c950="#003311",
+)
+
+theme = gr.themes.Default(
+    primary_hue=custom_green,
+    secondary_hue="sky",
+    neutral_hue="slate",
+).set(
+    body_background_fill="#F7F8F0",
+    body_background_fill_dark="#000000",
+    block_background_fill="#f7f8f0",
+    block_background_fill_dark="#000000",
+    block_border_color_dark="#bfbfbf",
+)
 
 with gr.Blocks(title="AI Chess Playground") as demo:
     session_state = gr.State(GameSession)
@@ -264,7 +299,7 @@ with gr.Blocks(title="AI Chess Playground") as demo:
         black_dd = gr.Dropdown(choices=MODEL_CHOICES, value="GPT-4.1-mini", label="Black Model")
 
     gr.HTML(
-        '<p>A higher number of turns results in a more complete game, '
+        '<p style="color: green">A higher number of turns results in a more complete game, '
         'but may take several minutes to finish running.</p>'
     )
     max_turns_slider = gr.Slider(minimum=60, maximum=500, value=200, step=10, label="Maximum Turns")
@@ -275,11 +310,12 @@ with gr.Blocks(title="AI Chess Playground") as demo:
 
     board_html = gr.HTML(value='<p style="color: green">Select models and press Start Game.</p>')
     status_box = gr.Textbox(label="Move Log", lines=20, interactive=False)
+    end_message_html = gr.HTML(value="")
 
-    outputs = [board_html, status_box, start_btn, reset_btn, session_state]
+    outputs = [board_html, status_box, start_btn, reset_btn, end_message_html, session_state]
     start_btn.click(fn=start_game, inputs=[white_dd, black_dd, max_turns_slider, session_state], outputs=outputs)
     reset_btn.click(fn=reset_game, inputs=[session_state], outputs=outputs)
 
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(inbrowser=True, theme=theme)
