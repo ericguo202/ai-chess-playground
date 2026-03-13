@@ -127,26 +127,31 @@ def create_tools(session: GameSession):
                 winner = "Black" if session.board.turn == chess.WHITE else "White"
                 session.move_log.append(f"Checkmate — {winner} wins!")
                 session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
+                session.end_message = "Game Over"
                 session.queue.put_nowait(None)
                 return {"status": "game_over"}
             elif session.board.is_stalemate():
                 session.move_log.append("Stalemate — draw.")
                 session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
+                session.end_message = "Game Over"
                 session.queue.put_nowait(None)
                 return {"status": "game_over"}
             elif session.board.is_insufficient_material():
                 session.move_log.append("Insufficient material — draw.")
                 session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
+                session.end_message = "Game Over"
                 session.queue.put_nowait(None)
                 return {"status": "game_over"}
             elif session.board.is_seventyfive_moves():
                 session.move_log.append("75-move rule — draw.")
                 session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
+                session.end_message = "Game Over"
                 session.queue.put_nowait(None)
                 return {"status": "game_over"}
             elif session.board.is_fivefold_repetition():
                 session.move_log.append("Fivefold repetition — draw.")
                 session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
+                session.end_message = "Game Over"
                 session.queue.put_nowait(None)
                 return {"status": "game_over"}
             else:
@@ -170,7 +175,7 @@ def create_tools(session: GameSession):
 
     return make_move, get_opponent_last_move
 
-
+# Create the competing agents
 def create_agents(session: GameSession, white_model, black_model):
     make_move, get_opponent_last_move = create_tools(session)
 
@@ -203,6 +208,7 @@ async def start_game(white_choice: str, black_choice: str, max_turns: int, sessi
         gr.update(interactive=False),
         gr.update(interactive=False),
         "",
+        "",
         session,
     )
 
@@ -212,13 +218,11 @@ async def start_game(white_choice: str, black_choice: str, max_turns: int, sessi
 
     async def run_game():
         try:
-            result = await Runner.run(white_agent, "start", max_turns=max_turns)
-            if isinstance(result.final_output, str) and result.final_output.strip():
-                session.end_message = result.final_output.strip()
+            await Runner.run(white_agent, "start", max_turns=max_turns)
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            session.move_log.append(f"Error: {e}")
+        except Exception:
+            session.end_message = f"Error: exceeded max turns ({max_turns})"
             session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
         finally:
             session.queue.put_nowait(None)
@@ -235,17 +239,26 @@ async def start_game(white_choice: str, black_choice: str, max_turns: int, sessi
             log,
             gr.update(interactive=False),
             gr.update(interactive=False),
+            "Game Ongoing...",
             "",
             session,
         )
 
-    end_html = f"<p style='color: green'>{session.end_message}</p>" if session.end_message else ""
+    lichess_url = "https://lichess.org/analysis/" + session.board.fen().replace(" ", "_")
+    end_reason = f'<p style="color: red; font-size: 24px; text-align: center;">{session.end_message}</p>'
+    lichess_link = (
+        f'<a href="{lichess_url}" target="_blank" style="display:inline-block;padding:8px 16px;'
+        f'background-color:#007100;color:white;text-decoration:none;border-radius:4px;'
+        f'font-size:14px;font-weight:600;">Analyze Position on Lichess</a>'
+    )
+
     yield (
         session.board_svg(),
         "\n".join(session.move_log),
         gr.update(interactive=True),
         gr.update(interactive=True),
-        end_html,
+        end_reason,
+        lichess_link,
         session,
     )
 
@@ -257,6 +270,7 @@ async def reset_game(session: GameSession):
         "Board reset. Select models and start a new game.",
         gr.update(interactive=True),
         gr.update(interactive=True),
+        "",
         "",
         session,
     )
@@ -292,7 +306,7 @@ theme = gr.themes.Default(
 with gr.Blocks(title="AI Chess Playground") as demo:
     session_state = gr.State(GameSession)
 
-    gr.HTML('<h1 style="color: green">AI Chess Playground</h1>')
+    gr.HTML('<h1 style="color: green; text-align: center">AI Chess Playground</h1>')
 
     with gr.Row():
         white_dd = gr.Dropdown(choices=MODEL_CHOICES, value="GPT-4.1-mini", label="White Model")
@@ -302,17 +316,18 @@ with gr.Blocks(title="AI Chess Playground") as demo:
         '<p style="color: green">A higher number of turns results in a more complete game, '
         'but may take several minutes to finish running.</p>'
     )
-    max_turns_slider = gr.Slider(minimum=60, maximum=500, value=200, step=10, label="Maximum Turns")
+    max_turns_slider = gr.Slider(minimum=10, maximum=500, value=200, step=10, label="Maximum Turns")
 
     with gr.Row():
         start_btn = gr.Button("Start Game", variant="primary")
         reset_btn = gr.Button("Reset Board")
 
-    board_html = gr.HTML(value='<p style="color: green">Select models and press Start Game.</p>')
-    status_box = gr.Textbox(label="Move Log", lines=20, interactive=False)
     end_message_html = gr.HTML(value="")
+    board_html = gr.HTML(value='<p style="color: green">Select models and press Start Game.</p>')
+    lichess_html = gr.HTML(value="")
+    status_box = gr.Textbox(label="Move Log", lines=20, interactive=False)
 
-    outputs = [board_html, status_box, start_btn, reset_btn, end_message_html, session_state]
+    outputs = [board_html, status_box, start_btn, reset_btn, end_message_html, lichess_html, session_state]
     start_btn.click(fn=start_game, inputs=[white_dd, black_dd, max_turns_slider, session_state], outputs=outputs)
     reset_btn.click(fn=reset_game, inputs=[session_state], outputs=outputs)
 
