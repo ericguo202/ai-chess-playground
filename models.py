@@ -32,10 +32,12 @@ oss_model = OpenAIChatCompletionsModel(model="openai/gpt-oss-120b", openai_clien
 qwen_model = OpenAIChatCompletionsModel(model="qwen/qwen3.8-27b", openai_client=openrouter_client)
 nano_model = OpenAIChatCompletionsModel(model="openai/gpt-5-nano", openai_client=openrouter_client)
 haiku_model = OpenAIChatCompletionsModel(model="anthropic/claude-haiku-5.5", openai_client=openrouter_client)
+luna_model = OpenAIChatCompletionsModel(model="openai/gpt-5.6-luna", openai_client=openrouter_client)
+gpt_model = OpenAIChatCompletionsModel(model="openai/gpt-4.1-mini", openai_client=openrouter_client)
 
 MODEL_MAP = {
-    "GPT-4.1-mini": "gpt-4.1-mini",
-    "GPT-5.6-Luna": "gpt-5.6-luna",
+    "GPT-4.1-mini": gpt_model,
+    "GPT-5.6-Luna": luna_model,
     "GPT-5-nano": nano_model,
     "Gemini 3.6 Flash": gemini_model,
     "DeepSeek v4.1 flash": deepseek_model,

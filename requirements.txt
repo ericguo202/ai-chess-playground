@@ -1,0 +1,6 @@
+chess>=1.11.2
+gradio>=5.0.0
+openai>=2.26.0
+openai-agents[litellm]==0.11.1
+pydantic>=2.12.5
+python-dotenv>=1.2.2
