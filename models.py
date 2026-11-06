@@ -24,26 +24,23 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # grok_client = AsyncOpenAI(base_url=GROK_BASE_URL, api_key=os.getenv("GROK_API_KEY"))
 openrouter_client = AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=os.getenv("OPENROUTER_API_KEY"))
 
-deepseek_model = OpenAIChatCompletionsModel(model="deepseek-chat", openai_client=openrouter_client)
-gemini_model = OpenAIChatCompletionsModel(model="gemini-2.5-pro", openai_client=openrouter_client)
-grok_model = OpenAIChatCompletionsModel(model="grok-4-1-fast-non-reasoning", openai_client=openrouter_client)
+deepseek_model = OpenAIChatCompletionsModel(model="deepseek/deepseek-v4.1-flash", openai_client=openrouter_client)
+gemini_model = OpenAIChatCompletionsModel(model="google/gemini-3.6-flash", openai_client=openrouter_client)
+grok_model = OpenAIChatCompletionsModel(model="x-ai/grok-4.6", openai_client=openrouter_client)
 claude_model = OpenAIChatCompletionsModel(model="claude-haiku-4-5-20251001", openai_client=openrouter_client)
 oss_model = OpenAIChatCompletionsModel(model="openai/gpt-oss-120b", openai_client=openrouter_client)
-qwen_model = OpenAIChatCompletionsModel(model="qwen/qwen3-235b-a22b-2507", openai_client=openrouter_client)
-xiaomi_model = OpenAIChatCompletionsModel(model="xiaomi/mimo-v2-flash", openai_client=openrouter_client)
+qwen_model = OpenAIChatCompletionsModel(model="qwen/qwen3.8-27b", openai_client=openrouter_client)
 nano_model = OpenAIChatCompletionsModel(model="openai/gpt-5-nano", openai_client=openrouter_client)
-haiku35_model = OpenAIChatCompletionsModel(model="anthropic/claude-3.5-haiku", openai_client=openrouter_client)
-haiku45_model = OpenAIChatCompletionsModel(model="anthropic/claude-haiku-4.5", openai_client=openrouter_client)
+haiku_model = OpenAIChatCompletionsModel(model="anthropic/claude-haiku-5.5", openai_client=openrouter_client)
 
 MODEL_MAP = {
     "GPT-4.1-mini": "gpt-4.1-mini",
-    "GPT-5-nano": "gpt-5-nano",
-    "Gemini 2.5 Pro": gemini_model,
-    "DeepSeek Chat": deepseek_model,
-    "Grok 4.1": grok_model,
-    "Claude Haiku 3.5": haiku35_model,
-    "Claude Haiku 4.5": haiku45_model,
+    "GPT-5.6-Luna": "gpt-5.6-luna",
+    "GPT-5-nano": nano_model,
+    "Gemini 3.6 Flash": gemini_model,
+    "DeepSeek v4.1 flash": deepseek_model,
+    "Grok 4.6": grok_model,
+    "Claude Haiku 5.5": haiku_model,
     "GPT-OSS-120b": oss_model,
-    "Qwen3": qwen_model,
-    "Xiaomi MiMo-V2-Flash": xiaomi_model,
+    "Qwen 3.8": qwen_model,
 }
