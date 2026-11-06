@@ -3,16 +3,23 @@ import asyncio
 import chess
 import chess.svg
 import gradio as gr
-import os
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
 from agents import (
     Agent,
     Runner,
     function_tool,
-    OpenAIChatCompletionsModel,
     set_default_openai_api,
 )
+
+# System prompts
+from instructions import WHITE_INSTRUCTIONS, BLACK_INSTRUCTIONS
+
+# Dictionary of models
+# Environment variables are loaded through models, including OPENAI_API_KEY which is needed in app.py
+from models import MODEL_MAP
+
+# Gradio theme
+from themes import theme
 
 load_dotenv(override=True)
 
@@ -20,78 +27,7 @@ load_dotenv(override=True)
 # so we must standardize on that
 set_default_openai_api("chat_completions") 
 
-# Set up our models
-GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
-GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1/"
-GROK_BASE_URL = "https://api.x.ai/v1"
-
-deepseek_client = AsyncOpenAI(base_url=DEEPSEEK_BASE_URL, api_key=os.getenv("DEEPSEEK_API_KEY"))
-gemini_client = AsyncOpenAI(base_url=GEMINI_BASE_URL, api_key=os.getenv("GOOGLE_API_KEY"))
-anthropic_client = AsyncOpenAI(base_url=ANTHROPIC_BASE_URL, api_key=os.getenv("ANTHROPIC_API_KEY"))
-grok_client = AsyncOpenAI(base_url=GROK_BASE_URL, api_key=os.getenv("GROK_API_KEY"))
-
-deepseek_model = OpenAIChatCompletionsModel(model="deepseek-chat", openai_client=deepseek_client)
-gemini_model = OpenAIChatCompletionsModel(model="gemini-2.5-pro", openai_client=gemini_client)
-grok_model = OpenAIChatCompletionsModel(model="grok-4-1-fast-reasoning", openai_client=grok_client)
-claude_model = OpenAIChatCompletionsModel(model="claude-haiku-4-5-20251001", openai_client=anthropic_client)
-
-MODEL_MAP = {
-    "GPT-4.1-mini": "gpt-4.1-mini",
-    "Gemini 2.5 Pro": gemini_model,
-    "DeepSeek Chat": deepseek_model,
-    "Grok 4": grok_model,
-    "Claude Haiku 4.5": claude_model,
-}
-
 MODEL_CHOICES = list(MODEL_MAP.keys()) # list of model names
-
-# System instructions
-WHITE_INSTRUCTIONS = """
-    You are a chess player playing WHITE. You must follow this protocol EXACTLY.
-    OUTPUT RULE (CRITICAL):
-    - You MUST NOT output any normal text.
-    - The ONLY allowed normal-text output are the words "RESIGN" or "GAME OVER"
-    - Otherwise, you MUST communicate only by calling tools.
-    TURN PROTOCOL:
-    On "start" or when you have control:
-    1) Call tool get_opponent_last_move() to get Black's last move. If it returns None, you are first to move.
-    2) If you think you are losing, you MUST respond with normal text "RESIGN".
-    3) Otherwise, choose ONE move in standard algebraic notation.
-        - DO NOT include move numbers (e.g. do NOT write "1.e4").
-        - DO NOT include commentary or multiple lines.
-        - Produce exactly one SAN move string to the tool.
-    4) Call the make_move tool with that move.
-        - If make_move returns status "illegal move", immediately call make_move again using ONE of the provided legal_moves.
-        - Repeat until make_move returns status does not indicate "illegal move".
-        - If make_move returns status "game_over", respond with normal text "GAME OVER"
-    5) Immediately call transfer_to_black if status indicates success
-        - Do NOT print the move; do not summarize; do not ask questions.
-    """
-
-BLACK_INSTRUCTIONS = """
-    You are a chess player playing BLACK. You must follow this protocol EXACTLY.
-    OUTPUT RULE (CRITICAL):
-    - You MUST NOT output any normal text.
-    - The ONLY allowed normal-text output are the words "RESIGN" or "GAME OVER"
-    - Otherwise, you MUST communicate only by calling tools.
-    TURN PROTOCOL:
-    When you have control:
-    1) Call tool get_opponent_last_move() to get White's last move.
-    2) If you think you are losing, you MUST respond with normal text "RESIGN".
-    3) Otherwise, choose ONE move in standard algebraic notation.
-        - DO NOT include move numbers (e.g. do NOT write "1...e5").
-        - DO NOT include commentary or multiple lines.
-        - Produce exactly one SAN move string to the tool.
-    4) Call the make_move tool with that move.
-        - If make_move returns status "illegal move", immediately call make_move again using ONE of the provided legal_moves.
-        - Repeat until make_move returns status does not indicate "illegal move".
-        - If make_move returns status "game_over", respond with normal text "GAME OVER"
-    5) Immediately call transfer_to_white if status indicates success
-        - Do NOT print the move; do not summarize; do not ask questions.
-    """
-
 
 class GameSession:
     def __init__(self):
@@ -123,6 +59,7 @@ def create_tools(session: GameSession):
             session.board.push_san(san_move)
             session.move_log.append(san_move)
 
+            # Check for ending positions
             if session.board.is_checkmate():
                 winner = "Black" if session.board.turn == chess.WHITE else "White"
                 session.move_log.append(f"Checkmate — {winner} wins!")
@@ -136,28 +73,33 @@ def create_tools(session: GameSession):
                 session.end_message = "Game Over"
                 session.queue.put_nowait(None)
                 return {"status": "game_over"}
+            # Draw by insufficient material to checkmate
             elif session.board.is_insufficient_material():
                 session.move_log.append("Insufficient material — draw.")
                 session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
                 session.end_message = "Game Over"
                 session.queue.put_nowait(None)
                 return {"status": "game_over"}
+            # Draw by having 75 moves without pawn movements or captures
             elif session.board.is_seventyfive_moves():
                 session.move_log.append("75-move rule — draw.")
                 session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
                 session.end_message = "Game Over"
                 session.queue.put_nowait(None)
                 return {"status": "game_over"}
+            # Same position is repeated five times in the game
             elif session.board.is_fivefold_repetition():
                 session.move_log.append("Fivefold repetition — draw.")
                 session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
                 session.end_message = "Game Over"
                 session.queue.put_nowait(None)
                 return {"status": "game_over"}
+            # No stopping end position detected
             else:
                 session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
                 return {"status": "success"}
 
+        # LLMs can commonly make illegal moves - provide hints for legal moves
         except chess.IllegalMoveError:
             legal_moves = ", ".join(session.board.san(m) for m in session.board.legal_moves)
             return {"status": "Illegal move", "legal_moves": legal_moves}
@@ -165,6 +107,8 @@ def create_tools(session: GameSession):
     # Retrieve opponent's previous move
     @function_tool
     def get_opponent_last_move():
+        # Get the last move by temporarily popping from the move stack to retrieve the move
+        # And then pushing the popped move onto the stack again
         try:
             move = session.board.pop()
             san = session.board.san(move)
@@ -275,34 +219,8 @@ async def reset_game(session: GameSession):
         session,
     )
 
-# Set themes
-custom_green = gr.themes.Color(
-    name="css_green",
-    c50="#e6f4e6",
-    c100="#cce9cc",
-    c200="#99d399",
-    c300="#66bd66",
-    c400="#339633",
-    c500="#007100",  # custom green
-    c600="#007700",
-    c700="#006600",
-    c800="#004d00",
-    c900="#003300",
-    c950="#003311",
-)
 
-theme = gr.themes.Default(
-    primary_hue=custom_green,
-    secondary_hue="sky",
-    neutral_hue="slate",
-).set(
-    body_background_fill="#F7F8F0",
-    body_background_fill_dark="#000000",
-    block_background_fill="#f7f8f0",
-    block_background_fill_dark="#000000",
-    block_border_color_dark="#bfbfbf",
-)
-
+# Build the frontend UI using Gradio
 with gr.Blocks(title="AI Chess Playground") as demo:
     session_state = gr.State(GameSession)
 
