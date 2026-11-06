@@ -3,9 +3,9 @@ import asyncio
 import chess
 import chess.svg
 import gradio as gr
-from dotenv import load_dotenv
 from agents import (
     Agent,
+    MaxTurnsExceeded,
     Runner,
     function_tool,
     set_default_openai_api,
@@ -21,14 +21,17 @@ from models import MODEL_MAP
 # Gradio theme
 from themes import theme
 
-load_dotenv(override=True)
-
 # by default openAI uses the response API but all of our other models use the chat completions API
 # so we must standardize on that
 set_default_openai_api("chat_completions") 
 
 MODEL_CHOICES = list(MODEL_MAP.keys()) # list of model names
 
+# Raised by tools to stop the agent run as soon as the game ends
+class GameOver(Exception):
+    pass
+
+# Active game session
 class GameSession:
     def __init__(self):
         self.board = chess.Board()
@@ -46,63 +49,70 @@ class GameSession:
         self.game_task = None
         self.end_message = ""
 
+    # Renders chessbaord as an SVG image, highlighting the last move
     def board_svg(self) -> str:
         lastmove = self.board.peek() if self.board.move_stack else None
         return chess.svg.board(self.board, size=400, lastmove=lastmove)
 
 # Creates the tools that the agents have access to
 def create_tools(session: GameSession):
+    # Record the result and stop the agent run so that no further LLM calls are made
+    def finish_game(result: str):
+        session.move_log.append(result)
+        session.end_message = "Game Over"
+        session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
+
+        # raises an exception to stop the agent run
+        raise GameOver(result)
+
     # Make a move on the board
-    @function_tool
-    def make_move(san_move: str):
+    # failure_error_function=None lets GameOver stop the run instead of being reported to the LLM
+    # async so that tools from one response run one at a time (sync tools run in worker threads)
+    @function_tool(failure_error_function=None)
+    async def make_move(san_move: str):
+        # A model can call several tools in one response, so the game may have already ended
+        if session.end_message:
+            return {"status": "game_over"}
+
         try:
             session.board.push_san(san_move)
-            session.move_log.append(san_move)
-
-            # Check for ending positions
-            if session.board.is_checkmate():
-                winner = "Black" if session.board.turn == chess.WHITE else "White"
-                session.move_log.append(f"Checkmate — {winner} wins!")
-                session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
-                session.end_message = "Game Over"
-                session.queue.put_nowait(None)
-                return {"status": "game_over"}
-            elif session.board.is_stalemate():
-                session.move_log.append("Stalemate — draw.")
-                session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
-                session.end_message = "Game Over"
-                session.queue.put_nowait(None)
-                return {"status": "game_over"}
-            # Draw by insufficient material to checkmate
-            elif session.board.is_insufficient_material():
-                session.move_log.append("Insufficient material — draw.")
-                session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
-                session.end_message = "Game Over"
-                session.queue.put_nowait(None)
-                return {"status": "game_over"}
-            # Draw by having 75 moves without pawn movements or captures
-            elif session.board.is_seventyfive_moves():
-                session.move_log.append("75-move rule — draw.")
-                session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
-                session.end_message = "Game Over"
-                session.queue.put_nowait(None)
-                return {"status": "game_over"}
-            # Same position is repeated five times in the game
-            elif session.board.is_fivefold_repetition():
-                session.move_log.append("Fivefold repetition — draw.")
-                session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
-                session.end_message = "Game Over"
-                session.queue.put_nowait(None)
-                return {"status": "game_over"}
-            # No stopping end position detected
-            else:
-                session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
-                return {"status": "success"}
-
         # LLMs can commonly make illegal moves - provide hints for legal moves
-        except chess.IllegalMoveError:
+        # ValueError covers illegal, invalid and ambiguous moves
+        except ValueError:
             legal_moves = ", ".join(session.board.san(m) for m in session.board.legal_moves)
             return {"status": "Illegal move", "legal_moves": legal_moves}
+
+        session.move_log.append(san_move)
+
+        # Check for ending positions
+        if session.board.is_checkmate():
+            winner = "Black" if session.board.turn == chess.WHITE else "White"
+            finish_game(f"Checkmate — {winner} wins!")
+        elif session.board.is_stalemate():
+            finish_game("Stalemate — draw.")
+        # Draw by insufficient material to checkmate
+        elif session.board.is_insufficient_material():
+            finish_game("Insufficient material — draw.")
+        # Draw by having 75 moves without pawn movements or captures
+        elif session.board.is_seventyfive_moves():
+            finish_game("75-move rule — draw.")
+        # Same position is repeated five times in the game
+        elif session.board.is_fivefold_repetition():
+            finish_game("Fivefold repetition — draw.")
+
+        # No stopping end position detected
+        session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
+        return {"status": "success"}
+
+    # Resign the game on behalf of the side to move
+    @function_tool(failure_error_function=None)
+    async def resign():
+        """Resign the game. You lose immediately and the game ends."""
+        if session.end_message:
+            return {"status": "game_over"}
+
+        loser, winner = ("White", "Black") if session.board.turn == chess.WHITE else ("Black", "White")
+        finish_game(f"{loser} resigns — {winner} wins!")
 
     # Retrieve opponent's previous move
     @function_tool
@@ -117,24 +127,24 @@ def create_tools(session: GameSession):
         except IndexError:
             return None
 
-    return make_move, get_opponent_last_move
+    return make_move, get_opponent_last_move, resign
 
 # Create the competing agents
 def create_agents(session: GameSession, white_model, black_model):
-    make_move, get_opponent_last_move = create_tools(session)
+    make_move, get_opponent_last_move, resign = create_tools(session)
 
     white_agent = Agent(
         name="white",
         instructions=WHITE_INSTRUCTIONS,
         model=white_model,
-        tools=[make_move, get_opponent_last_move],
+        tools=[make_move, get_opponent_last_move, resign],
         handoff_description="Opponent chess player who will make the next move",
     )
     black_agent = Agent(
         name="black",
         instructions=BLACK_INSTRUCTIONS,
         model=black_model,
-        tools=[make_move, get_opponent_last_move],
+        tools=[make_move, get_opponent_last_move, resign],
         handoff_description="Opponent chess player who will make the next move",
     )
     white_agent.handoffs = [black_agent]
@@ -165,9 +175,13 @@ async def start_game(white_choice: str, black_choice: str, max_turns: int, sessi
             await Runner.run(white_agent, "start", max_turns=max_turns)
         except asyncio.CancelledError:
             pass
-        except Exception:
+        except MaxTurnsExceeded:
             session.end_message = f"Error: exceeded max turns ({max_turns})"
-            session.queue.put_nowait((session.board_svg(), "\n".join(session.move_log)))
+        except Exception as e:
+            # The SDK wraps GameOver in another exception, and finish_game has already set
+            # end_message, so a blank end_message means this is a real error
+            if not session.end_message:
+                session.end_message = f"Error: {e}"
         finally:
             session.queue.put_nowait(None)
 
